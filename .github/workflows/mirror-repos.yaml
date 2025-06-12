@@ -1,0 +1,60 @@
+name: "[Gitlab] Mirror Repos"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create SSH key
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Get repos
+        id: get-repos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          GITHUB_REPOS=$(gh search repos --owner samjuk --visibility=public --archived=false --json=name -L 500 -q '[.[].name] | unique | join(" ")')
+          echo "github-repos=${GITHUB_REPOS}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync to Gitlab
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOS: ${{ steps.get-repos.outputs.github-repos }}
+        run: |
+          for repo in ${GITHUB_REPOS}; do
+            echo "Starting Mirroring: $repo"
+            git="git --git-dir ${repo}.git"
+
+            remote="git@gitlab.com:samjuk1/${repo}.git"
+
+            echo "Fetching ${repo} from GitHub"
+            gh repo clone "samjuk/${repo}" -- --mirror
+
+            echo "Doing some cleanup for ${repo}"
+            ${git} reflog expire --expire-unreachable=now --all
+            ${git} gc            --prune=now
+
+            echo "List latest tags from ${repo}"
+            LATEST_TAGS=$(${git} for-each-ref --sort=taggerdate --format '%(refname:short)' refs/tags | tail -4000 | tr '\n' ' ')
+
+            echo "Pushing latest ${repo} tags to remote"
+            ${git} push "${remote}" --force ${LATEST_TAGS}
+
+            echo "Pushing all ${repo} repo branches to remote"
+            ${git} push "${remote}" --force --quiet --all
+
+            echo "Manually pushing ${repo} git heads information to remote"
+            ${git} push "${remote}" +refs/remotes/origin/*:refs/heads/*
+
+          done
